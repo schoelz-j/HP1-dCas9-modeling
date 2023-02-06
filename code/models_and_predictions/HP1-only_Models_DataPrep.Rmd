@@ -1,0 +1,159 @@
+---
+title: "HP1-Only_Models_DataPrep"
+author: "Jack Schoelz"
+date: "9/23/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Data Preparation for HP1-Only Regression models
+
+This document prepares input data for modeling using elastic net regressions in three cell types: S2-DRSC, BG3 and CME-W1. For each cell type, HP1a, HP1B and HP1C TSS enrichment (and interactions) will be used to predict gene expression using elastic net regression models. The purpose of this document is to prepare datasets for each cell type that include each of these variables as well as FBgn identifiers for each gene. 
+
+```{r}
+library(dplyr)
+library(here)
+library(picante)
+```
+
+### Read in datasets to get started
+
+First datasets are TSS ChIP profiles for HP1a, HP1B and HP1C in S2 cells calculated by deepTools. This dataset is lacking FBgn identifiers. The order of genes is consistent with the order in the bed file of TSS coordinates that was an input for the generation of these matrices (genes dataset below). The only exceptions to this are a handful of genes which are filtered out of the matrix (skipped). To add gene names to the TSS enrichment data, remove the skipped genes from the total gene set.
+
+The final step will be to integrate TSS enrichment with expression data using the common FBgn column, and then calculating interaction terms.
+
+```{r}
+read_hp1 <- function(dir_name, cell.type){
+  # Read in all HP1 data for a given cell type and return summarized data in dataframe format (rows are genes)
+  
+  # dir_name -- name of the directory where ChIP data of a given cell type is located
+  # cell.type -- cell type name as listed in dataset filenames
+  
+  hp1_names <- c('HP1a', 'HP1B', 'HP1C')
+  hp1 <- list()
+  
+  for(i in seq(1:3)){
+    hp1[[i]] <- rowMeans(read.csv(here(paste("datasets/model_inputs/HP1_Coverage/", 
+                                            dir_name, "/", hp1_names[i], "_", cell.type, "_R.tab", sep = '')),
+                        sep = '\t', header = T), na.rm = T)
+  }
+  hp1_df <- as.data.frame(hp1)
+  colnames(hp1_df) <- hp1_names
+  
+  hp1_df
+}
+
+s2_hp1 <- read_hp1('S2-DRSC', 'S2')
+str(s2_hp1)
+bg3_hp1 <- read_hp1('BG3', 'BG3')
+str(bg3_hp1)
+cme_hp1 <- read_hp1('CME-W1', 'CME')
+str(cme_hp1)
+
+skipped_genes <- read.csv(here("datasets/model_inputs/HP1_Coverage/S2-DRSC/HP1a_S2.err"), sep = ' ', header = F)
+genes <- read.csv(here("datasets/model_inputs/HP1_Coverage/BG3/dros_r6.25_TSSs.bed"), sep = '\t', header = F)
+colnames(genes) <- c('Chromosome', 'Start', 'Stop', 'FBgn', 'V1', 'Strand')
+colnames(skipped_genes)[2] <- 'FBgn_'
+
+expression <- read.csv(here("datasets/S2_binding_expression.csv"), header = T)
+```
+
+### Integrate datasets
+
+To add gene names to the TSS enrichment data, remove the skipped genes from the total gene set.
+
+The final step will be to integrate TSS enrichment with expression data using the common FBgn column, and then calculating interaction terms.
+
+```{r}
+skipped_genes <- skipped_genes %>% mutate(FBgn = substr(FBgn_, 1, nchar(FBgn_)-1))
+genes$skipped <- genes$FBgn %in% skipped_genes$FBgn
+str(expression)
+
+final_frame <- function(hp1_data, cell.type){
+  # Add FBgn identifiers and interaction terms to a dataframe to get final output
+  
+  # hp1_data -- an instance of read_hp1()
+  # cell.type -- cell type name as listed in 'expression' dataframe
+  
+  if(cell.type == 'S2'){
+    tpms <- expression %>% group_by(as.factor(FlyBase_FBgn)) %>% summarise(mean_TPM = mean(S2, na.rm = T))
+  } else if(cell.type == 'BG3'){
+    tpms <- expression %>% group_by(as.factor(FlyBase_FBgn)) %>% summarise(mean_TPM = mean(BG3, na.rm = T))
+  } else if(cell.type == 'CME'){
+    tpms <- expression %>% group_by(as.factor(FlyBase_FBgn)) %>% summarise(mean_TPM = mean(CME, na.rm = T))
+  }
+  
+  colnames(tpms) <- c('FBgn', 'TPM')
+  tpms <- data.frame(tpms) %>%
+    mutate(log_TPM = log(TPM)) %>%
+    select(FBgn, log_TPM)
+  
+  hp1_data$FBgn <- genes$FBgn[genes$skipped == F]
+  
+  hp1_data <- hp1_data %>%
+    mutate(A_B = HP1a * HP1B,
+           A_C = HP1a * HP1C,
+           B_C = HP1B * HP1C,
+           A_B_C = HP1a * HP1B * HP1C)
+  
+  hp1_data <- inner_join(hp1_data, tpms, by = 'FBgn')
+  final <- hp1_data[complete.cases(hp1_data) == T,] %>%
+    filter(is.finite(log_TPM) == T)
+  final
+}
+
+s2_out <- final_frame(s2_hp1, 'S2')
+bg3_out <- final_frame(bg3_hp1, 'BG3')
+cme_out <- final_frame(cme_hp1, 'CME')
+
+head(s2_out)
+```
+
+### Write Output
+
+After integrating all the datasets, write .csv files that will be used for modeling in jupyter notebooks.
+
+```{r}
+write.table(s2_out, file = here('datasets/model_inputs/HP1-only-S2-Inputs.csv'), 
+            col.names = T, row.names = F, sep = ',', quote = F)
+write.table(bg3_out, file = here('datasets/model_inputs/HP1-only-BG3-Inputs.csv'), 
+            col.names = T, row.names = F, sep = ',', quote = F)
+write.table(cme_out, file = here('datasets/model_inputs/HP1-only-CME-Inputs.csv'), 
+            col.names = T, row.names = F, sep = ',', quote = F)
+```
+
+### Produce Permutation datasets
+
+Last step is to generate row-wise permuted datasets that are used to evaluate model performance.
+
+```{r}
+permut_df <- function(model_input){
+  df_mat <- model_input %>%
+    select(-FBgn, -log_TPM) %>%
+    as.matrix()
+  df_random <- randomizeMatrix(as.matrix(df_mat), null.model = 'richness',
+                               iterations = 10000)
+  df_random <- data.frame(df_random)
+  df_random$log_TPM <- model_input$log_TPM
+  df_random
+}
+s2_permut <- permut_df(s2_out)
+bg3_permut <- permut_df(bg3_out)
+cme_permut <- permut_df(cme_out)
+
+write.table(s2_permut, file = here('datasets/model_inputs/permutation_inputs/HP1-only-S2-permut-Inputs.csv'),
+            col.names = T, row.names = F, sep = ',', quote = F)
+write.table(bg3_permut, file = here('datasets/model_inputs/permutation_inputs/HP1-only-BG3-permut-Inputs.csv'),
+            col.names = T, row.names = F, sep = ',', quote = F)
+write.table(cme_permut, file = here('datasets/model_inputs/permutation_inputs/HP1-only-CME-permut-Inputs.csv'),
+            col.names = T, row.names = F, sep = ',', quote = F)
+```
+### Print environment for reproducibility
+
+```{r}
+print(ls(environment()))
+print((.packages()))
+```
