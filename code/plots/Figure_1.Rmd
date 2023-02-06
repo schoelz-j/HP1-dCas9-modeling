@@ -1,0 +1,256 @@
+---
+title: "Figure 1"
+author: "Jack Schoelz"
+date: "9/24/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Figure 1: HP1 only model results
+
+Analyze model output from the HP1 only model predictions generated from S2, BG3 and CME cells.
+Load package libraries:
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(here)
+```
+
+Read in input datasets:
+
+```{r}
+s2_train <- read.csv('../datasets/model_outputs/HP1-only-S2-training-output.csv')
+s2_test <- read.csv('../datasets/model_outputs/HP1-only-S2-testing-output.csv')
+s2_coefs <- read.csv('../datasets/model_outputs/HP1-only-S2-coefficients.csv')
+
+bg3_train <- read.csv('../datasets/model_outputs/HP1-only-BG3-training-output.csv')
+bg3_test <- read.csv('../datasets/model_outputs/HP1-only-BG3-testing-output.csv')
+bg3_coefs <- read.csv('../datasets/model_outputs/HP1-only-BG3-coefficients.csv')
+
+cme_train <- read.csv('../datasets/model_outputs/HP1-only-CME-training-output.csv')
+cme_test <- read.csv('../datasets/model_outputs/HP1-only-CME-testing-output.csv')
+cme_coefs <- read.csv('../datasets/model_outputs/HP1-only-CME-coefficients.csv')
+
+s2p_train <- read.csv('../datasets/model_outputs/HP1-only-S2-permut-training-output.csv')
+s2p_test <- read.csv('../datasets/model_outputs/HP1-only-S2-permut-testing-output.csv')
+s2p_coefs <- read.csv('../datasets/model_outputs/HP1-only-S2-permut-coefficients.csv')
+
+bg3p_train <- read.csv('../datasets/model_outputs/HP1-only-BG3-permut-training-output.csv')
+bg3p_test <- read.csv('../datasets/model_outputs/HP1-only-BG3-permut-testing-output.csv')
+bg3p_coefs <- read.csv('../datasets/model_outputs/HP1-only-BG3-permut-coefficients.csv')
+
+cmep_train <- read.csv('../datasets/model_outputs/HP1-only-CME-permut-training-output.csv')
+cmep_test <- read.csv('../datasets/model_outputs/HP1-only-CME-permut-testing-output.csv')
+cmep_coefs <- read.csv('../datasets/model_outputs/HP1-only-CME-permut-coefficients.csv')
+```
+
+### Correlation plots
+
+Calculate Spearman correlations between real and predicted values and generate corresponding plots.
+
+```{r}
+cor.test(s2_train$Y_true, s2_train$Y_pred, method = "spearman")
+s2_corplot <- ggplot(s2_train, aes(s2_train$Y_pred, s2_train$Y_true))+
+  geom_point(alpha = 0.3, color = 'grey')+
+  geom_smooth(method = 'lm')+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'))+
+  xlab('Predicted Expression')+
+  ylab('Actual Expression')
+resid <- sqrt(mean((s2_train$Y_pred - s2_train$Y_true)^2))
+
+cor.test(bg3_train$Y_true, bg3_train$Y_pred, method = "spearman")
+bg3_corplot <- ggplot(bg3_train, aes(Y_pred, Y_true))+
+  geom_point(alpha = 0.3, color = 'grey')+
+  geom_smooth(method = 'lm')+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'))+
+  xlab('Predicted Expression')+
+  ylab('Actual Expression')
+
+
+cor.test(cme_train$Y_true, cme_train$Y_pred, method = "spearman")
+cme_corplot <- ggplot(cme_train, aes(Y_pred, Y_true))+
+  geom_point(alpha = 0.3, color = 'grey')+
+  geom_smooth(method = 'lm')+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'))+
+  xlab('Predicted Expression')+
+  ylab('Actual Expression')
+```
+
+### Model performances
+
+Plot model performances comparing real vs permuted data.
+
+```{r}
+performance_vplot <- function(hp1_results, perm_results){
+  hp1_results$model <- rep('HP1', nrow(hp1_results))
+  hp1_pre <- hp1_results %>% select(-FBgn)
+  
+  perm_results$model <- rep('Permuted', nrow(perm_results))
+  
+  both_models <- data.frame(rbind(hp1_pre, perm_results)) %>%
+    mutate(Resid = Y_pred - Y_true)
+  
+  ggplot(both_models, aes(x = as.factor(model), y = abs(Resid), fill = as.factor(model)))+
+    geom_violin(color = 'lightgrey')+
+    geom_boxplot(width = 0.1, color = 'lightgrey')+
+    xlab('')+
+    ylab('Absolute Residual')+
+    scale_fill_manual(values = c('#473E92', 'darkgrey'))+
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          legend.position = 'none',
+          panel.border = element_rect(color = 'black', fill = 'NA'))
+}
+
+s2_train_v <- performance_vplot(s2_train, s2p_train)
+s2_test_v <- performance_vplot(s2_test, s2p_test)
+bg3_train_v <- performance_vplot(bg3_train, bg3p_train)
+bg3_test_v <- performance_vplot(bg3_test, bg3p_test)
+cme_train_v <- performance_vplot(cme_train, cmep_train)
+cme_test_v <- performance_vplot(cme_test, cmep_test)
+
+s2_train$Resid = s2_train$Y_pred - s2_train$Y_true
+s2p_train$Resid = s2p_train$Y_pred - s2p_train$Y_true
+t.test(abs(s2_train$Resid), abs(s2p_train$Resid))
+
+s2_test$Resid = s2_test$Y_pred - s2_test$Y_true
+s2p_test$Resid = s2p_test$Y_pred - s2p_test$Y_true
+t.test(abs(s2_test$Resid), abs(s2p_test$Resid))
+
+bg3_train$Resid = bg3_train$Y_pred - bg3_train$Y_true
+bg3p_train$Resid = bg3p_train$Y_pred - bg3p_train$Y_true
+t.test(abs(bg3_train$Resid), abs(bg3p_train$Resid))
+
+bg3_test$Resid = bg3_test$Y_pred - bg3_test$Y_true
+bg3p_test$Resid = bg3p_test$Y_pred - bg3p_test$Y_true
+t.test(abs(bg3_test$Resid), abs(bg3p_test$Resid))
+
+cme_train$Resid = cme_train$Y_pred - cme_train$Y_true
+cmep_train$Resid = cmep_train$Y_pred - cmep_train$Y_true
+t.test(abs(cme_train$Resid), abs(cmep_train$Resid))
+
+cme_test$Resid = cme_test$Y_pred - cme_test$Y_true
+cmep_test$Resid = cmep_test$Y_pred - cmep_test$Y_true
+t.test(abs(cme_test$Resid), abs(cmep_test$Resid))
+```
+
+### Model Coefficients
+
+Plot coefficient magnitudes and signs from each model
+
+```{r}
+str(s2_coefs)
+coef_plot <- function(coef_df, ymax){
+  
+  color_values = c('darkblue', 'darkgrey', 'darkred')
+  label_values = c('Negative', 'Zero', 'Positive')
+  check = length(levels(as.factor(sign(coef_df$Coefficient))))
+  
+  if(check == 3){
+    # This is based on assumptions
+    final_colors = color_values
+    final_labels = label_values
+  }else if(check == 2){
+    final_colors = c(color_values[1], color_values[3])
+    final_labels = c(label_values[1], label_values[3])
+  }else if(check == 1){
+    final_colors = c(color_values[3])
+    final_labels = c(label_values[3])
+  }
+  
+  ggplot(coef_df, aes(x = as.factor(reorder(Feature, -abs(Coefficient))), y = abs(Coefficient), color = as.factor(sign(Coefficient))))+
+    geom_point(size = 3.5)+
+    coord_flip()+
+  ylab('Coefficient Magnitude')+
+  xlab('')+
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'Black'),
+        panel.grid = element_line(color = 'grey'),
+        legend.position = 'none')+
+  scale_color_manual(values = final_colors,
+                     labels = final_labels,
+                     name = 'Coefficient Sign')+
+  scale_x_discrete(labels = c('HP1B', 'HP1B*HP1C', 'HP1a*HP1B', 'HP1a', 'HP1C', 'HP1a*HP1C',
+                              'HP1a*HP1B*HP1C'))+
+  scale_y_continuous(limits = c(0, ymax))
+}
+s2_cplot <- coef_plot(s2_coefs, 2)
+s2p_cplot <- coef_plot(s2p_coefs, 2)
+bg3_cplot <- coef_plot(bg3_coefs, 1)
+bg3p_cplot <- coef_plot(bg3p_coefs, 1)
+cme_cplot <- coef_plot(cme_coefs, 1.5)
+cmep_cplot <- coef_plot(cmep_coefs, 1.5)
+```
+
+### Write output PDF files
+
+```{r}
+# copy and paste code into another r script
+pdf('Figure1_d2_1.pdf', height = 4, width = 12)
+
+ggarrange(s2_corplot, s2_train_v, s2_test_v, s2_cplot, s2p_cplot,
+          nrow = 1, ncol = 5)
+dev.off()
+
+pdf('Supplementary_Fig1_d2.pdf', height = 8, width = 12)
+ggarrange(bg3_corplot, bg3_train_v, bg3_test_v, bg3_cplot, bg3p_cplot,
+          cme_corplot, cme_train_v, cme_test_v, cme_cplot, cmep_cplot,
+          nrow = 2, ncol = 5)
+dev.off()
+```
+```{r}
+# Examine correlation between HP1 and gene expression
+input_data <- read.csv(here('datasets/model_inputs/HP1-only-S2-Inputs.csv'))
+cor(input_data$log_TPM, input_data$HP1a)
+cor(input_data$log_TPM, input_data$HP1B)
+cor(input_data$log_TPM, input_data$HP1C)
+
+cor(input_data$HP1a, input_data$HP1C)
+cor(input_data$HP1a, input_data$HP1B)
+
+cor(input_data$HP1B, input_data$HP1C)
+
+bg3_data <- read.csv(here('datasets/model_inputs/HP1-only-BG3-Inputs.csv'))
+cme_data <- read.csv(here('datasets/model_inputs/HP1-only-CME-Inputs.csv'))
+
+cor(bg3_data$log_TPM, bg3_data$HP1a)
+cor(bg3_data$log_TPM, bg3_data$HP1B)
+cor(bg3_data$log_TPM, bg3_data$HP1C)
+
+cor(cme_data$log_TPM, cme_data$HP1a)
+cor(cme_data$log_TPM, cme_data$HP1B)
+cor(cme_data$log_TPM, cme_data$HP1C)
+```
+
+## Residual plots
+
+Is HP1 content correlated with error?
+
+```{r}
+model_input <- read.csv('../datasets/model_inputs/HP1-only-S2-Inputs.csv')
+full_data <- left_join(s2_train, model_input, by = 'FBgn')
+str(s2_train)
+cor.test(abs(full_data$Resid), full_data$HP1C, method = 'spearman')
+
+ggplot(full_data, aes(x = HP1a, y = abs(Resid)))+
+  geom_point(shape = 21, color = 'black', fill = '#473E92', size = 3)+
+  geom_smooth(method = 'lm', color = 'lightgrey')+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'))+
+  xlab('HP1a TSS Enrichment')+
+  ylab('Residual Absolute Value')
+
+
+```
