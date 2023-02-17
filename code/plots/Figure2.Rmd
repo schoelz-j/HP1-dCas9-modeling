@@ -1,0 +1,357 @@
+---
+title: "Figure2_d3"
+author: "Jack Schoelz"
+date: "10/5/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(here)
+```
+
+## HP1 Plus model performance
+
+Examine correlation between real and predicted values from the HP1 plus model. 
+
+```{r}
+plus_train <- read.csv('../datasets/model_outputs/HP1_plus_train_predictions_no_RFE.csv', header = T)
+plus_test <- read.csv('../datasets/model_outputs/HP1_plus_test_predictions_no_RFE.csv', header = T)
+cor.test(plus_train$Y_true, plus_train$Y_pred, method='spearman')
+cor(plus_test$Y_true, plus_test$Y_pred, method='spearman')
+
+no_train <- read.csv('../datasets/model_outputs/No_HP1_train_predictions_no_RFE.csv', header = T)
+no_test <- read.csv('../datasets/model_outputs/No_HP1_test_predictions_no_RFE.csv', header = T)
+cor(no_train$Y_true, no_train$Y_pred, method='spearman')
+cor(no_test$Y_true, no_test$Y_pred, method = 'spearman')
+
+ggplot(plus_train, aes(x = Y_pred, y = Y_true))+
+  geom_point(shape = 21, color = 'black', fill = 'orange',
+             size=3)+
+  geom_smooth(method='lm', color = 'black')+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(color = 'black'))+
+  xlab('Predicted Expression')+
+  ylab('Actual Expression')
+ggplot(no_train, aes(x = Y_pred, y = Y_true))+
+  geom_point(shape = 21, color = 'black', fill = 'orange')+
+  geom_smooth(method = 'lm', color = 'black')
+```
+
+## Bootstrap Analysis
+
+Compare differences in correlations across models using bootstrapped spearman correlations.
+
+```{r}
+bootstrap_cor <- function(preds){
+  B <- 10000
+  corX <- rep(0, B)
+  for(i in 1:B){
+    samp <- sample(nrow(preds), 50, TRUE)
+    corX[i] <- cor(x=preds$Y_true[samp], y=preds$Y_pred[samp], method = 'spearman')
+  }
+  corX
+}
+bootstrap_ci <- function(pred1, pred2){
+  # Use this function to evaluate whether two datasets have different correlations
+  # pred1 and pred2 and two dataframes of model predictions
+  B <- 10000
+  cor1 <- cor2 <- rep(0, B)
+  differ <- rep(0, B)
+  for(i in 1:B){
+    samp <- sample(min(c(nrow(pred1), nrow(pred2))), 500, TRUE)
+    cor1[i] <- cor(x=pred1$Y_true[samp], y=pred1$Y_pred[samp], method = 'spearman')
+    cor2[i] <- cor(x=pred2$Y_true[samp], y=pred2$Y_pred[samp], method = 'spearman')
+    differ[i] <- cor1[i] - cor2[i]
+  }
+  differ
+}
+
+pperm_train <- read.csv('../datasets/model_outputs/HP1_Plus_Permutation_TrainPreds.csv')
+np_train <- read.csv('../datasets/model_outputs/No_HP1_Permutation_TrainPreds.csv')
+bootstrapped_cors <- data.frame(models = c(rep('HP1_Plus', 10000),
+                                           rep('Plus_Permutation', 10000),
+                                           rep('No_HP1', 10000),
+                                           rep('No_Permutation', 10000)),
+                                cor_values = c(bootstrap_cor(plus_train),
+                                               bootstrap_cor(pperm_train),
+                                               bootstrap_cor(no_train),
+                                               bootstrap_cor(np_train)))
+bootstrapped_cors$models <- as.factor(bootstrapped_cors$models)
+ggplot(bootstrapped_cors, aes(x = models, y = cor_values, fill = models))+
+  geom_violin()+
+  geom_boxplot(width = 0.2)+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'),
+        legend.position = 'none')+
+  ylab('Bootstrapped Spearman Correlation')+
+  xlab('Model')+
+  scale_fill_brewer(palette = 5)+
+  scale_x_discrete(labels = c('HP1 Plus', 'No HP1', 'No HP1 Permuted', 'HP1 Plus Permuted'))
+
+pairwise.t.test(bootstrapped_cors$cor_values, g = bootstrapped_cors$models)
+diff_cors <- bootstrapped_cors$cor_values[bootstrapped_cors$models=='HP1_Plus'] - bootstrapped_cors$cor_values[bootstrapped_cors$models=='No_HP1']
+t.test(diff_cors)
+```
+
+## Test set bootstrapped correlations
+
+Repeat the above plot for the test set
+
+```{r}
+pperm_test <- read.csv('../datasets/model_outputs/HP1_Plus_Permutation_TestPreds.csv')
+np_test <- read.csv('../datasets/model_outputs/No_HP1_Permutation_TestPreds.csv')
+
+#test_bp_cors <- data.frame(models = bootstrapped_cors$models,
+#                           cor_values = c(bootstrap_cor(plus_test),
+#                                          bootstrap_cor(no_test),
+#                                          bootstrap_cor(pperm_test),
+#                                          bootstrap_cor(np_test)))
+
+```
+
+## Coefficients
+
+Plot coefficients for actual and permuted models for both HP1 plus and No HP1 models.
+
+```{r}
+plus_coefs <- read.csv('../datasets/model_outputs/HP1_plus_coefficients_no_RFE.csv')
+no_coefs <- read.csv('../datasets/model_outputs/No_HP1_coefficients_no_RFE.csv')
+pperm_coefs <- read.csv('../datasets/model_outputs/HP1_Plus_Permutations_Coefs.csv')
+np_coefs <- read.csv('../datasets/model_outputs/No_HP1_Permutations_Coefs.csv')
+
+coef_plot <- function(coef_df, ymax){
+  
+  color_values = c('darkblue', 'darkgrey', 'darkred')
+  label_values = c('Negative', 'Zero', 'Positive')
+  check = length(levels(as.factor(sign(coef_df$Coefficient))))
+  
+  if(check == 3){
+    # This is based on assumptions
+    final_colors = color_values
+    final_labels = label_values
+  }else if(check == 2){
+    final_colors = c(color_values[1], color_values[3])
+    final_labels = c(label_values[1], label_values[3])
+  }else if(check == 1){
+    final_colors = c(color_values[3])
+    final_labels = c(label_values[3])
+  }
+  
+  ggplot(coef_df, aes(x = as.factor(reorder(Feature, -abs(Coefficient))), y = abs(Coefficient), color = as.factor(sign(Coefficient))))+
+    geom_point(size = 3.5)+
+    coord_flip()+
+  ylab('Coefficient Magnitude')+
+  xlab('')+
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'Black'),
+        panel.grid = element_line(color = 'grey'),
+        legend.position = 'none')+
+  scale_color_manual(values = final_colors,
+                     labels = final_labels,
+                     name = 'Coefficient Sign')+
+  #scale_x_discrete(labels = c('HP1B', 'HP1B*HP1C', 'HP1a*HP1B', 'HP1a', 'HP1C', 'HP1a*HP1C',
+  #                            'HP1a*HP1B*HP1C'))+
+  scale_y_continuous(limits = c(0, ymax))
+}
+str(plus_coefs)
+colnames(plus_coefs) <- c('Feature', 'Coefficient')
+# Plot the top 20 coefficients
+quantile(abs(plus_coefs$Coefficient))
+plus_coefs_sorted <- plus_coefs[order(-abs(plus_coefs$Coefficient)),]
+coef_plot(plus_coefs_sorted[1:25,], 1.5)
+
+no_coefs_sorted <- no_coefs[order(-abs(no_coefs$Coefficient)),]
+coef_plot(no_coefs_sorted[1:25,], 1.5)
+```
+## Residual Plots
+
+```{r}
+input_data <- read.csv('../datasets/model_inputs/hp1_plus_input.csv')
+str(input_data)
+
+all_data <- left_join(plus_train, input_data, by = 'FBgn') %>%
+  mutate(resid = Y_pred - Y_true)
+ggplot(all_data, aes(x = HP1a, y = resid))+
+  geom_point(size = 3, shape = 21, color = 'black', fill = '#473E92')+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'))+
+  xlab('HP1a TSS Enrichment')+
+  ylab('Prediction Error')
+
+ggplot(all_data, aes(x = HP1B, y = resid))+
+  geom_point(size = 3, shape = 21, color = 'black', fill = '#2D8775')+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'))+
+  xlab('HP1B TSS Enrichment')+
+  ylab('Prediction Error')
+
+ggplot(all_data, aes(x = HP1C, y = resid))+
+  geom_point(size = 3, shape = 21, color = 'black', fill = '#8F3086')+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'))+
+  xlab('HP1C TSS Enrichment')+
+  ylab('Prediction Error')
+```
+## Interaction Plots: Figure 3
+
+Last step for Figure 2. Visualize interactions for HP1 'classes'. Based on coefficient data, will focus on HP1C variables -- GAGA Score, Disco Sites, Density and Accessibility.
+
+```{r}
+hp1_classes <- read.csv(here('datasets/model_inputs/HP1_Coverage/S2-DRSC/HP1_Classes_S2.csv'))
+plus_data <- read.csv(here('datasets/model_inputs/hp1_plus_input.csv'))
+plus_classes <- inner_join(plus_data, hp1_classes, by = 'FBgn')
+#str(plus_classes)
+#str(hp1_classes)
+
+plus_classes_copy <- plus_classes
+# Will annotate as '7+' in illustrator
+plus_classes_copy$GAGA_Sites[plus_classes_copy$GAGA_Sites > 7] <- 7
+plus_classes_copy$Disco_Sites[plus_classes_copy$Disco_Sites > 4] <- 4
+plus_classes_copy$DRE_Sites[plus_classes_copy$DRE_Sites > 5] <- 5
+
+plus_classes_copy %>%
+  filter(HP1C.Class != 'HP1C.Target.Potential') %>%
+  #filter(GAGA_Sites > 0) %>%
+  ggplot(aes(x = as.factor(GAGA_Sites), y = log_TPM, fill = as.factor(HP1C.Class)))+
+  geom_boxplot()+
+  scale_fill_manual(values = c('grey', '#8F3086'))+
+  scale_x_discrete(labels = c(seq(0,6), '7+'))+
+  xlab('Number of GAGA Motif Sites')+
+  ylab('Log(TPM)')+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'),
+        legend.position = 'none')
+
+plus_classes_copy %>%
+  filter(HP1C.Class != 'HP1C.Target.Potential') %>%
+  #filter(Disco_Sites > 0) %>%
+  ggplot(aes(x = as.factor(Disco_Sites), y = log_TPM, fill = as.factor(HP1C.Class)))+
+  geom_boxplot()+
+  scale_fill_manual(values = c('grey', '#8F3086'))+
+  scale_x_discrete(labels = c(seq(0,3), '4+'))+
+  xlab('Number of Disco Motif Sites')+
+  ylab('Log(TPM)')+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'),
+        legend.position = 'none')
+
+plus_classes_copy %>%
+  filter(HP1C.Class != 'HP1C.Target.Potential') %>%
+  #filter(DRE_Sites > 0) %>%
+  ggplot(aes(x = as.factor(DRE_Sites), y = log_TPM, fill = as.factor(HP1C.Class)))+
+  geom_boxplot()+
+  scale_fill_manual(values = c('grey', '#8F3086'))+
+  scale_x_discrete(labels = c(seq(0,4), '5+'))+
+  xlab('Number of DRE Motif Sites')+
+  ylab('Log(TPM)')+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'),
+        legend.position = 'none')
+
+plus_classes_copy %>%
+  filter(HP1C.Class != 'HP1C.Target.Potential') %>%
+  ggplot(aes(x = log(Mean_Accesibility), y = log_TPM, color = HP1C.Class))+
+  geom_density_2d()+
+  scale_color_manual(values = c('grey', '#8F3086'))+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.line = element_line(color = 'black'),
+        legend.position = 'none')+
+  xlab('Log (Mean Accessibility)')+
+  ylab('Log (TPM)')
+  
+summary(aov(plus_classes_copy$log_TPM[plus_classes_copy$HP1C.Class == 'HP1C.Target.On'] ~ plus_classes_copy$GAGA_Sites[plus_classes_copy$HP1C.Class == 'HP1C.Target.On']))
+pairwise.t.test(plus_classes_copy$log_TPM[plus_classes_copy$HP1C.Class == 'HP1C.Target.On'],
+                g = plus_classes_copy$GAGA_Sites[plus_classes_copy$HP1C.Class == 'HP1C.Target.On'],
+                p.adjust.method = 'fdr')
+length(plus_classes_copy$FBgn[plus_classes_copy$HP1C.Class == 'HP1C.Target.On' &
+                                plus_classes_copy$GAGA_Sites == 6])
+
+summary(aov(plus_classes_copy$log_TPM[plus_classes_copy$HP1C.Class == 'HP1C.Target.On'] ~ plus_classes_copy$DRE_Sites[plus_classes_copy$HP1C.Class == 'HP1C.Target.On']))
+pairwise.t.test(plus_classes_copy$log_TPM[plus_classes_copy$HP1C.Class == 'HP1C.Target.On'],
+                g = plus_classes_copy$DRE_Sites[plus_classes_copy$HP1C.Class == 'HP1C.Target.On'],
+                p.adjust.method = 'fdr')
+
+
+summary(aov(plus_classes_copy$log_TPM[plus_classes_copy$HP1C.Class == 'HP1C.Target.On'] ~ plus_classes_copy$Disco_Sites[plus_classes_copy$HP1C.Class == 'HP1C.Target.On']))
+pairwise.t.test(plus_classes_copy$log_TPM[plus_classes_copy$HP1C.Class == 'HP1C.Target.On'],
+                g = plus_classes_copy$Disco_Sites[plus_classes_copy$HP1C.Class == 'HP1C.Target.On'],
+                p.adjust.method = 'fdr')
+plus_classes_copy %>%
+  filter(HP1B.Class != 'HP1B.Target.Potential') %>%
+  ggplot(aes(x = as.factor(state.name_1), y = log_TPM, fill = HP1B.Class))+
+  geom_boxplot()+
+  coord_flip()+
+  scale_fill_manual(values = c('grey', '#2D8775'))+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'),
+        legend.position = 'none')
+
+plus_classes_copy %>%
+  filter(HP1B.Class != 'HP1B.Target.Potential') %>%
+  ggplot(aes(x = as.factor(state.name_2), y = log_TPM, fill = HP1B.Class))+
+  geom_boxplot()+
+  coord_flip()+
+  scale_fill_manual(values = c('grey', '#2D8775'))+
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'NA', color = 'black'),
+        legend.position = 'none')
+
+summary(aov(plus_classes$log_TPM[plus_classes$HP1C.Class == 'HP1C.Target.On' & plus_classes$Disco_Sites > 0] ~ as.factor(plus_classes$Disco_Sites[plus_classes$HP1C.Class == 'HP1C.Target.On' & plus_classes$Disco_Sites > 0])))
+
+length(plus_classes$FBgn[plus_classes$HP1C.Class == 'HP1C.Target.On' & plus_classes$Disco_Sites == 1])
+t.test(plus_classes$log_TPM[plus_classes$Disco_Sites == 4 & plus_classes$HP1C.Class == 'HP1C.Target.On'], plus_classes$log_TPM[plus_classes$Disco_Sites == 4 & plus_classes$HP1C.Class == 'HP1C.NonTarget'])
+
+t.test(plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.Target.On' & plus_classes$state.name_2 == 1],
+       plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.NonTarget' & plus_classes$state.name_2 == 1])
+t.test(plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.Target.On' & plus_classes$state.name_2 == 0],
+       plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.NonTarget' & plus_classes$state.name_2 == 0])
+t.test(plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.Target.On' & plus_classes$state.name_2 == 1],
+       plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.Target.On' & plus_classes$state.name_2 == 0])
+
+t.test(plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.Target.On' & plus_classes$state.name_1 == 1],
+       plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.NonTarget' & plus_classes$state.name_1 == 1])
+t.test(plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.Target.On' & plus_classes$state.name_1 == 0],
+       plus_classes$log_TPM[plus_classes$HP1B.Class == 'HP1B.NonTarget' & plus_classes$state.name_1 == 0])
+```
+
+### Supplemental Figure
+
+Check model performance and coefficient estimates for HP1 plus model without HP1 interactions with genomic and epigenomic
+features.
+
+```{r}
+main_coefs <- read.csv('../datasets/model_outputs/HP1_plus_coefficients_main_effects_only.csv')
+main_preds <- read.csv('../datasets/model_outputs/HP1_plus_train_predictions_main_effects_only.csv')
+str(main_preds)
+ggplot(main_preds, aes(x = Y_true, Y_pred))+
+  geom_point()
+str(main_coefs)
+colnames(main_coefs) <- c('Feature', 'Coefficient')
+main_coefs_sorted <- main_coefs[order(-abs(main_coefs$Coefficient)),]
+coef_plot(main_coefs_sorted[1:25,], 1.5)+
+  scale_x_discrete(labels = main_coefs_sorted$Feature[1:25])
+
+ggplot(main_preds, aes(x = Y_pred, y = Y_true))+
+  geom_point(shape = 21, color = 'black', fill = 'orange',
+             size=3)+
+  geom_smooth(method='lm', color = 'black')+
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(color = 'black'))+
+  xlab('Predicted Expression')+
+  ylab('Actual Expression')
+```
