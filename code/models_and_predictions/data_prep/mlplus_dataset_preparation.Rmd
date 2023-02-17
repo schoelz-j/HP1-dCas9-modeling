@@ -1,0 +1,832 @@
+---
+title: "HP1 Plus Model Data Prep"
+author: "Jack Schoelz"
+date: "10/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Prep Data for HP1 Plus Model
+
+The goal of this document is to integrate all of the input datasets and calculate interaction variables for the HP1 plus model. The output of this code will be used as an input for the HP1 plus jupyter notebook.
+
+```{r}
+library(dplyr)
+library(picante)
+library(mltools)
+library(data.table)
+library(here)
+```
+
+## Load Datasets
+
+Need to include HP1 TSS coverage, TSS accessibility, chromatin state, promoter nucleotide composition, motif distributions, pausing indices, local gene densities, number of exons, GC content of promoter/gene body 
+
+```{r}
+# HP1 TSS coverage
+hp1 <- read.csv(here('datasets/model_inputs/HP1_Coverage/S2-DRSC/HP1_TSS_coverage_S2.csv'))
+# TSS accessibility
+tss <- read.csv(here('datasets/model_inputs/Epigenomic_Inputs/S2-DRSC/TSS_Accessibility/TSS_Accessibility_S2.csv'))
+# Chromatin State
+cstate <- read.csv(here('datasets/model_inputs/Epigenomic_Inputs/S2-DRSC/S2_Chromatin_States_RF_Input.csv'))
+# Nucleotide composition
+nucs <- read.csv(here('datasets/model_inputs/Genomic_Inputs/promoter_nucleotide_frequencies.csv'))
+# Motif Distributions
+disco <- read.csv(here('datasets/model_inputs/Genomic_Inputs/disco_fimo_results.tsv'), sep = '\t')
+dre <- read.csv(here('datasets/model_inputs/Genomic_Inputs/dre_fimo_results.tsv'), sep = '\t')
+gaga <- read.csv(here('datasets/model_inputs/Genomic_Inputs/gaga_fimo_results.tsv'), sep = '\t')
+# Exon Number
+exons <- read.csv(here('datasets/model_inputs/Genomic_Inputs/drosophila_exon_numbers.csv'))
+# Pausing Indices
+pinds <- read.csv(here('datasets/model_inputs/Epigenomic_Inputs/S2_Pausing_Indices.csv'), header = F)
+# Gene Densities
+densities <- read.csv(here('datasets/model_inputs/Genomic_Inputs/gene_densities.csv'))
+# GC Content
+gc <- read.csv(here('datasets/model_inputs/Genomic_Inputs/dmel_r6.25_genes_gc_content.csv'), header = F)
+# expression (target variables)
+expression <- read.csv(here('datasets/S2_binding_expression.csv'))
+dcas_fbgns <- c('FBgn0030398', 'FBgn0034569', 'FBgn0000276', 'FBgn0014865')
+log(expression$S2[expression$FlyBase_FBgn==dcas_fbgns[4]])
+```
+
+## Preprocess data
+
+Before the data can be integrated into a single dataset there needs to be some formatting/preprocessing, so I'll 
+get to work on that here.
+
+```{r}
+hp1 <- hp1 %>%
+  select(V4, HP1a, HP1B, HP1C) %>%
+  mutate(A_B = HP1a * HP1B,
+         A_C = HP1a * HP1C,
+         B_C = HP1B * HP1C,
+         A_B_C = HP1a * HP1B * HP1C)
+colnames(hp1)[1] <- 'FBgn'
+str(hp1)
+
+str(tss)
+
+# One hot encoding of Chromatin state (only categorical variable)
+str(cstate)
+cstate$state.name <- as.factor(cstate$state.name)
+cstate_1hot <- one_hot(as.data.table(cstate))
+
+str(nucs)
+
+str(gc)
+colnames(gc) <- c('Name', 'FBgn_', 'Chromosome', 'Start', 'Stop', 'Strand', 'HP1a', 'HP1B', 'HP1C',
+                  'GC.Promoter', 'GC.Body')
+gc <- gc %>%
+  mutate(FBgn = substr(FBgn_, 1, nchar(FBgn_) - 1)) %>%
+  select(FBgn, GC.Promoter, GC.Body)
+
+str(pinds)
+colnames(pinds) <- c('Name', 'PInd', 'FBgn')
+pinds <- pinds %>%
+  select(FBgn, PInd) %>%
+  filter(is.finite(PInd))
+
+str(exons)
+
+str(expression)
+expression <- expression %>%
+  group_by(FlyBase_FBgn) %>%
+  summarise(Avg_TPM = mean(S2)) %>%
+  mutate(log_TPM = log(Avg_TPM)) %>%
+  select(FlyBase_FBgn, log_TPM) %>%
+  filter(is.finite(log_TPM))
+colnames(expression)[1] <- 'FBgn'
+expression$log_TPM[expression$FBgn==dcas_fbgns[4]]
+
+str(densities)
+densities <- densities %>%
+  select(FBgn, density) %>%
+  filter(is.finite(density))
+str(gaga)
+colnames(gaga)[3] <- 'FBgn'
+gaga_summary <- gaga %>%
+  group_by(FBgn) %>%
+  summarise(GAGA_Sites = n(),
+            GAGA_Avg_Score = mean(score))
+colnames(disco)[3] <- 'FBgn'
+colnames(dre)[3] <- 'FBgn'
+disco_summary <- disco %>%
+  group_by(FBgn) %>%
+  summarise(Disco_Sites = n(),
+            Disco_Avg_Score = mean(score))
+dre_summary <- dre %>%
+  group_by(FBgn) %>%
+  summarise(DRE_Sites = n(),
+            DRE_Avg_Score = mean(score))
+```
+## Find Interactions
+
+Okay, now it is time to format the data into a single dataframe which can be outputted. I also want a dataset that
+does not include HP1 TSS coverage data.
+
+```{r}
+gen_data <- inner_join(tss, cstate_1hot, by = 'FBgn')
+gen_data <- inner_join(gen_data, gc, by = 'FBgn')
+gen_data <- inner_join(gen_data, pinds, by = 'FBgn')
+gen_data <- inner_join(gen_data, nucs, by = 'FBgn')
+gen_data <- inner_join(gen_data, exons, by = 'FBgn')
+gen_data <- inner_join(gen_data, expression, by = 'FBgn')
+gen_data <- inner_join(gen_data, densities, by = 'FBgn')
+
+gen_data <- left_join(gen_data, gaga_summary)
+gen_data <- left_join(gen_data, dre_summary)
+gen_data <- left_join(gen_data, disco_summary)
+
+gen_data$GAGA_Sites[is.na(gen_data$GAGA_Sites)] <- 0
+gen_data$GAGA_Avg_Score[is.na(gen_data$GAGA_Avg_Score)] <- 0
+gen_data$DRE_Sites[is.na(gen_data$DRE_Sites)] <- 0
+gen_data$DRE_Avg_Score[is.na(gen_data$DRE_Avg_Score)] <- 0
+gen_data$Disco_Sites[is.na(gen_data$Disco_Sites)] <- 0
+gen_data$Disco_Avg_Score[is.na(gen_data$Disco_Avg_Score)] <- 0
+colnames(hp1)[1] <- 'FBgn'
+gen_data_hp1 <- inner_join(gen_data, hp1, by = 'FBgn')
+write.table(gen_data_hp1, file = 'main_effects_only_plus_inputs.csv', col.names = T, row.names = F, sep = ',',
+            quote = F)
+hp1_for_interactions <- gen_data_hp1 %>%
+  select(HP1a, HP1B, HP1C)
+gen_for_interactions <- gen_data_hp1 %>%
+  select(-FBgn, -HP1a, -HP1B, -HP1C, -A_B, -A_C, -B_C, -A_B_C, -log_TPM)
+
+
+find_interactions <- function(HP1_df, dfB, out_df){
+  out_df = data.frame(c(rep(NA, nrow(dfB))))
+  for(i in seq(1:ncol(HP1_df))){
+    for(j in seq(1:ncol(dfB))){
+      
+      HP1 = HP1_df[,i]
+      varj = dfB[,j]
+      new_name = paste(names(HP1_df[i]), names(dfB[j]), sep = '*')
+      intervar = HP1 * varj
+      
+      k = j + (ncol(dfB)*(i-1))
+      out_df[,k] = intervar
+      names(out_df)[k] = new_name
+    }
+  }
+  out_df
+}
+
+hp1_interactions <- find_interactions(hp1_for_interactions, gen_for_interactions, hp1_interactions)
+hp1_int_vars <- gen_data_hp1 %>%
+  select(A_B, A_C, B_C, A_B_C)
+hp1_plus <- data.frame(cbind(gen_data_hp1$FBgn, gen_data_hp1$log_TPM, hp1_for_interactions, gen_for_interactions, hp1_interactions, hp1_int_vars))
+colnames(hp1_plus)[1] <- 'FBgn'
+colnames(hp1_plus)[2] <- 'log_TPM'
+```
+## Output dataset
+
+Now, output the 'HP1 plus' and 'No HP1' model input datasets.
+
+```{r}
+write.table(hp1_plus, here('datasets/model_inputs/hp1_plus_input.csv'), col.names = T, row.names = F, sep = ',',
+            quote = F)
+write.table(gen_data, file = here('datasets/model_inputs/no_hp1_input.csv'), col.names = T, row.names = F, sep = ',',
+            quote = F)
+```
+
+## Generate Permutations
+
+Last step: create rowwise permutations of each datasets to test the robustness of their interpretations.
+
+```{r}
+for(i in seq(1:ncol(hp1_plus))){
+  check1 = sum(is.na(hp1_plus[,i]))
+  check2 = sum(is.finite(hp1_plus[,i]))
+  
+  if(check1 > 0){
+    print(colnames(hp1_plus)[i])
+    print('NA Values')
+  }
+  if(check2 < nrow(hp1_plus)){
+    print(colnames(hp1_plus)[i])
+    print('Infinite Values')
+  }
+}
+plus_mat <- hp1_plus %>%
+  select(-FBgn, -log_TPM) %>%
+  as.matrix()
+no_mat <- gen_data %>%
+  select(-FBgn) %>%
+  as.matrix()
+plus_rand <- data.frame(randomizeMatrix(plus_mat, null.model = 'richness', iterations = 10000))
+no_rand <- data.frame(randomizeMatrix(no_mat, null.model = 'richness', iterations = 10000))
+plus_rand$log_TPM <- hp1_plus$log_TPM
+no_rand$log_TPM <- gen_data$log_TPM
+```
+
+## Output permutation datasets
+
+Now write these files to use them as modeling inputs.
+
+```{r}
+write.csv(plus_rand, file = here('datasets/model_inputs/HP1_Plus_Permuted_Input.csv'), col.names = T, row.names = F,
+          quote = F)
+write.csv(no_rand, file = here('datasets/model_inputs/No_HP1_Permuted_Inputs.csv'), col.names = T, row.names = F,
+          quote = F)
+```
+## Simulated datasets
+
+Generate simulated data for dCas9 validation
+
+```{r}
+dcas_fbgns <- c('FBgn0030398', 'FBgn0034569', 'FBgn0000276', 'FBgn0014865')
+
+hp1_classes <- read.csv('../datasets/model_inputs/HP1_Coverage/S2-DRSC/HP1_Classes_S2.csv')
+str(hp1_classes)
+
+hp1_classes <- full_join(hp1_classes, hp1, by = 'FBgn')
+# Generate simulated binding values
+hp1a_sim <- rnorm(1000, mean = median(hp1_classes$HP1a[hp1_classes$HP1a.Class=='HP1a.Target.On']), 
+                  sd=sd(hp1_classes$HP1a[hp1_classes$HP1a.Class=='HP1a.Target.On']))
+hp1b_sim <- rnorm(1000, mean = median(hp1_classes$HP1B[hp1_classes$HP1B.Class=='HP1B.Target.On']), 
+                  sd=sd(hp1_classes$HP1B[hp1_classes$HP1B.Class=='HP1B.Target.On']))
+hp1c_sim <- rnorm(1000, mean = median(hp1_classes$HP1C[hp1_classes$HP1C.Class=='HP1C.Target.On']), 
+                  sd=sd(hp1_classes$HP1C[hp1_classes$HP1C.Class=='HP1C.Target.On']))
+
+
+# Create a baseline dataset for each of these, and then calculate the fold change
+# Cpr11B
+
+# data values
+# Look up existing values
+cpr11b <- data.frame(cbind(tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[1]],
+#pind=0
+#density=0.0001176471
+gc$GC.Promoter[gc$FBgn==dcas_fbgns[1]],
+gc$GC.Body[gc$FBgn==dcas_fbgns[1]],
+exons$exon_num[exons$FBgn==dcas_fbgns[1]],
+#dre_sites=0
+#dre_score=0
+disco_summary$Disco_Sites[disco_summary$FBgn==dcas_fbgns[1]],
+disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[1]],
+gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[1]],
+gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[1]],
+cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[1],] %>%
+  select(-FBgn),
+nucs[nucs$FBgn==dcas_fbgns[1],] %>%
+  select(-FBgn)))
+colnames(cpr11b)[1:8] <- c('Mean_Accessibility', 'GC.Promoter', 'GC.Body', 'exon_num', 'Disco_Sites',
+                           'Disco_Avg_Score', 'GAGA_Sites', 'GAGA_Avg_Score')
+# Add in missing values manually
+cpr11b$PInd = 0
+cpr11b$density=0.0001176471
+cpr11b$DRE_Sites=0
+cpr11b$DRE_Avg_Score=0
+colnames(cpr11b)
+# Create duplicate rows to calculate simulated interaction data
+duptimes <- c(1000)
+idx <- rep(1:nrow(cpr11b), duptimes)
+cpr11b_presim <- cpr11b[idx,]
+
+# HP1 simulated datasets
+cb_asim = data.frame(HP1a = hp1a_sim, HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[1]], 1000),
+                     HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[1]], 1000))
+cb_bsim = data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[1]], 1000), HP1B = hp1b_sim,
+                     HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[1]], 1000))
+cb_csim = data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[1]], 1000), HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[1]]),
+                     HP1C = hp1c_sim)
+hp1a_cpr11b_ints <- find_interactions(cb_asim, cpr11b_presim)
+hp1a_cpr11b <- data.frame(cbind(cb_asim, cpr11b, hp1a_cpr11b_ints))
+hp1a_cpr11b <- hp1a_cpr11b %>%
+  mutate(A_B = HP1a * HP1B,
+         A_C = HP1a * HP1C,
+         B_C = HP1B * HP1C,
+         A_B_C = HP1a * HP1B * HP1C)
+
+hp1b_cpr11b_ints <- find_interactions(cb_bsim, cpr11b_presim)
+hp1b_cpr11b <- data.frame(cbind(cb_bsim, cpr11b, hp1b_cpr11b_ints))
+hp1b_cpr11b <- hp1b_cpr11b %>%
+  mutate(A_B = HP1a * HP1B,
+         A_C = HP1a * HP1C,
+         B_C = HP1B * HP1C,
+         A_B_C = HP1a * HP1B * HP1C)
+
+hp1c_cpr11b_ints <- find_interactions(cb_csim, cpr11b_presim)
+hp1c_cpr11b <- data.frame(cbind(cb_csim, cpr11b, hp1c_cpr11b_ints))
+hp1c_cpr11b <- hp1c_cpr11b %>%
+  mutate(A_B = HP1a * HP1B,
+         A_C = HP1a * HP1C,
+         B_C = HP1B * HP1C,
+         A_B_C = HP1a * HP1B * HP1C)
+
+# dgt3
+# Look up data values
+dgt3 <- data.frame(cbind(tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[2]],
+pinds$PInd[pinds$FBgn==dcas_fbgns[2]],
+densities$density[densities$FBgn==dcas_fbgns[2]],
+gc$GC.Body[gc$FBgn==dcas_fbgns[2]],
+gc$GC.Promoter[gc$FBgn==dcas_fbgns[2]],
+exons$exon_num[exons$FBgn==dcas_fbgns[2]],
+dre_summary$DRE_Avg_Score[dre_summary$FBgn==dcas_fbgns[2]],
+dre_summary$DRE_Sites[dre_summary$FBgn==dcas_fbgns[2]],
+#disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[2]]
+#disco_summary$Disco_Sites[disco_summary$FBgn==dcas_fbgns[2]]
+gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[2]],
+gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[2]],
+cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[2],] %>% select(-FBgn),
+nucs[nucs$FBgn==dcas_fbgns[2],] %>% select(-FBgn)))
+# Add missing values manually
+dgt3$Disco_Avg_Score=0
+dgt3$Disco_Sites=0
+colnames(dgt3)[1:10] <- c('Mean_Accessibility', 'PInd', 'density', 'GC.Body', 'GC.Promoter', 'exon_num',
+                          'DRE_Avg_Score', 'DRE_Sites', 'GAGA_Avg_Score', 'GAGA_Sites')
+
+idx <- rep(1:nrow(dgt3), duptimes)
+dgt3_presim <- dgt3[idx,]
+
+dgt3_asim <- data.frame(HP1a = hp1a_sim, HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[2]], 1000),
+                        HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[2]], 1000))
+dgt3_bsim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[2]], 1000), HP1B = hp1b_sim,
+                        HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[2]], 1000))
+dgt3_csim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[2]], 1000), HP1B=rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[2]],1000),
+                        HP1C = hp1c_sim)
+hp1a_dgt3_ints <- find_interactions(dgt3_asim, dgt3_presim)
+hp1b_dgt3_ints <- find_interactions(dgt3_bsim, dgt3_presim)
+hp1c_dgt3_ints <- find_interactions(dgt3_csim, dgt3_presim)
+
+hp1a_dgt3 <- data.frame(cbind(dgt3_asim, dgt3_presim, hp1a_dgt3_ints))
+hp1b_dgt3 <- data.frame(cbind(dgt3_bsim, dgt3_presim, hp1b_dgt3_ints))
+hp1c_dgt3 <- data.frame(cbind(dgt3_csim, dgt3_presim, hp1c_dgt3_ints))
+
+calc_hp1_ints <- function(hp1_df){
+  hp1_df <- hp1_df %>%
+    mutate(A_B = HP1a * HP1B,
+           A_C = HP1a * HP1C,
+           B_C = HP1B * HP1C,
+           A_B_C = HP1a * HP1B * HP1C)
+  hp1_df
+}
+hp1a_dgt3 <- calc_hp1_ints(hp1a_dgt3)
+hp1b_dgt3 <- calc_hp1_ints(hp1b_dgt3)
+hp1c_dgt3 <- calc_hp1_ints(hp1c_dgt3)
+
+# CecA1
+ceca1 <- data.frame(cbind(tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[3]],
+#pinds$PInd[pinds$FBgn==dcas_fbgns[3]]
+#densities$density[densities$FBgn==dcas_fbgns[3]]
+gc$GC.Body[gc$FBgn==dcas_fbgns[3]],
+gc$GC.Promoter[gc$FBgn==dcas_fbgns[3]],
+exons$exon_num[exons$FBgn==dcas_fbgns[3]],
+dre_summary$DRE_Avg_Score[dre_summary$FBgn==dcas_fbgns[3]],
+dre_summary$DRE_Sites[dre_summary$FBgn==dcas_fbgns[3]],
+#disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[3]]
+#disco_summary$Disco_Sites
+gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[3]],
+gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[3]],
+cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[3],] %>% select(-FBgn),
+nucs[nucs$FBgn==dcas_fbgns[3],] %>% select(-FBgn)))
+colnames(ceca1)[1:8] <- c('Mean_Accessibility', 'GC.Body', 'GC.Promoter', 'exon_num', 'DRE_Avg_Score', 'DRE_Sites',
+                          'GAGA_Avg_Score', 'GAGA_Sites')
+# Add in remaining values manually
+ceca1$PInd=0
+ceca1$density=0.0008823529
+ceca1$Disco_Avg_Score=0
+ceca1$Disco_Sites=0
+
+idx <- rep(1:nrow(ceca1), duptimes)
+ceca1_presim <- ceca1[idx,]
+
+ceca1_asim <- data.frame(HP1a = hp1a_sim, HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[3]], 1000),
+                         HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[3]], 1000))
+ceca1_bsim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[3]], 1000), HP1B = hp1b_sim,
+                         HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[3]], 1000))
+ceca1_csim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[3]], 1000), HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[3]]),
+                         HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[3]], 1000))
+
+ceca1_hp1a_ints <- find_interactions(ceca1_asim, ceca1_presim)
+ceca1_hp1b_ints <- find_interactions(ceca1_bsim, ceca1_presim)
+ceca1_hp1c_ints <- find_interactions(ceca1_csim, ceca1_presim)
+ceca1_hp1a <- data.frame(cbind(ceca1_asim, ceca1_presim, ceca1_hp1a_ints))
+ceca1_hp1b <- data.frame(cbind(ceca1_bsim, ceca1_presim, ceca1_hp1b_ints))
+ceca1_hp1c <- data.frame(cbind(ceca1_csim, ceca1_presim, ceca1_hp1c_ints))
+
+ceca1_hp1a <- calc_hp1_ints(ceca1_hp1a)
+ceca1_hp1b <- calc_hp1_ints(ceca1_hp1b)
+ceca1_hp1c <- calc_hp1_ints(ceca1_hp1c)
+
+# Mtk
+mtk <- data.frame(cbind(tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[4]],
+#pinds$PInd[pinds$FBgn==dcas_fbgns[4]]
+densities$density[densities$FBgn==dcas_fbgns[4]],
+gc$GC.Body[gc$FBgn==dcas_fbgns[4]],
+gc$GC.Promoter[gc$FBgn==dcas_fbgns[4]],
+exons$exon_num[exons$FBgn==dcas_fbgns[4]],
+#dre_summary$DRE_Avg_Score[dre_summary$FBgn==dcas_fbgns[4]]
+#dre_summary$DRE_Sites[dre_summary$FBgn==dcas_fbgns[4]]
+#disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[4]]
+#disco_summary$Disco_Sites
+gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[4]],
+gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[4]],
+cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[3],] %>% select(-FBgn),
+nucs[nucs$FBgn==dcas_fbgns[3],] %>% select(-FBgn)))
+colnames(mtk)[1:7] <- c('Mean_Accessibility', 'density', 'GC.Body', 'GC.Promoter', 'exon_num',
+                        'GAGA_Avg_Score', 'GAGA_Sites')
+mtk$PInd = 0
+mtk$DRE_Avg_Score = 0
+mtk$DRE_Sites = 0
+mtk$Disco_Avg_Score = 0
+mtk$Disco_Sites = 0
+
+idx <- rep(1:nrow(mtk), duptimes)
+mtk_presim <- mtk[idx,]
+mtk_asim <- data.frame(HP1a = hp1a_sim, HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[4]], 1000),
+                       HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[4]], 1000))
+mtk_bsim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[4]], 1000), HP1B = hp1b_sim,
+                       HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[4]], 1000))
+mtk_csim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[4]], 1000), HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[4]], 1000),
+                       HP1C = hp1c_sim)
+mtk_hp1a_ints <- find_interactions(mtk_asim, mtk_presim)
+mtk_hp1b_ints <- find_interactions(mtk_bsim, mtk_presim)
+mtk_hp1c_ints <- find_interactions(mtk_csim, mtk_presim)
+
+mtk_hp1a <- data.frame(cbind(mtk_asim, mtk_presim, mtk_hp1a_ints))
+mtk_hp1b <- data.frame(cbind(mtk_bsim, mtk_presim, mtk_hp1b_ints))
+mtk_hp1c <- data.frame(cbind(mtk_csim, mtk_presim, mtk_hp1c_ints))
+
+mtk_hp1a <- calc_hp1_ints(mtk_hp1a)
+mtk_hp1b <- calc_hp1_ints(mtk_hp1b)
+mtk_hp1c <- calc_hp1_ints(mtk_hp1c)
+```
+
+## Baseline datasets
+
+```{r}
+cpr11b_base <- data.frame(HP1a = hp1$HP1a[hp1$FBgn==dcas_fbgns[1]],
+                       HP1B = hp1$HP1B[hp1$FBgn==dcas_fbgns[1]],
+                       HP1C = hp1$HP1C[hp1$FBgn==dcas_fbgns[1]])
+dgt3_base <- data.frame(HP1a = hp1$HP1a[hp1$FBgn==dcas_fbgns[2]],
+                       HP1B = hp1$HP1B[hp1$FBgn==dcas_fbgns[2]],
+                       HP1C = hp1$HP1C[hp1$FBgn==dcas_fbgns[2]])
+ceca1_base <- data.frame(HP1a = hp1$HP1a[hp1$FBgn==dcas_fbgns[3]],
+                       HP1B = hp1$HP1B[hp1$FBgn==dcas_fbgns[3]],
+                       HP1C = hp1$HP1C[hp1$FBgn==dcas_fbgns[3]])
+mtk_base <- data.frame(HP1a = hp1$HP1a[hp1$FBgn==dcas_fbgns[4]],
+                       HP1B = hp1$HP1B[hp1$FBgn==dcas_fbgns[4]],
+                       HP1C = hp1$HP1C[hp1$FBgn==dcas_fbgns[4]])
+
+cpr11b_ints <- find_interactions(cpr11b_base, cpr11b_presim[1,])
+dgt3_ints <- find_interactions(dgt3_base, dgt3_presim[1,])
+ceca1_ints <- find_interactions(ceca1_base, ceca1_presim[1,])
+mtk_ints <- find_interactions(mtk_base, mtk_presim[1,])
+
+cpr11b2 <- data.frame(cbind(cpr11b_base, cpr11b[1,], cpr11b_ints))
+dgt32 <- data.frame(cbind(dgt3_base, dgt3[1,], dgt3_ints))
+ceca12 <- data.frame(cbind(ceca1_base, ceca1[1,], ceca1_ints))
+mtk2 <- data.frame(cbind(mtk_base, mtk[1,], mtk_ints))
+
+cpr11b2 <- calc_hp1_ints(cpr11b2)
+dgt32 <- calc_hp1_ints(dgt32)
+ceca12 <- calc_hp1_ints(ceca12)
+mtk2 <- calc_hp1_ints(mtk2)
+colnames(mtk2)
+
+for(i in seq(1:length(colnames(dgt32)))){
+  if(colnames(mtk2)[i] %in% colnames(dgt32) == F){
+    #print(colnames(dgt32)[i])
+    print(colnames(mtk2)[i])
+  }
+}
+
+baselines <- full_join(ceca12, dgt32)
+baselines <- full_join(baselines, cpr11b2)
+baselines <- full_join(baselines, mtk2)
+
+baselines_only <- baselines %>%
+  select(HP1a, HP1B, HP1C, A_B, A_C, B_C, A_B_C)
+write.table(baselines, file = 'HP1_Plus_dcas9_baselines.csv', sep = ',', quote = F, row.names = F, col.names = T)
+write.table(baselines_only, file = 'HP1_Only_dcas9_baselines.csv', sep = ',', quote = F, row.names = F, col.names = T)
+
+str(mtk_hp1a)
+```
+
+### Simulated datasets: HP1a binding targets
+
+```{r}
+# egr, pyr, mats
+dcas_fbgns <- c('FBgn0033483', 'FBgn0033649', 'FBgn0038965')
+
+egr <- data.frame(cbind(
+  tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[1]],
+  pinds$PInd[pinds$FBgn==dcas_fbgns[1]],
+  densities$density[densities$FBgn==dcas_fbgns[1]],
+  gc$GC.Promoter[gc$FBgn==dcas_fbgns[1]],
+  gc$GC.Body[gc$FBgn==dcas_fbgns[1]],
+  exons$exon_num[exons$FBgn==dcas_fbgns[1]],
+#dre_sites=0
+#dre_score=0
+#disco_sites=0
+#disco_score=0
+  gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[1]],
+  gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[1]],
+  cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[1],] %>%
+    select(-FBgn),
+  nucs[nucs$FBgn==dcas_fbgns[1],] %>%
+    select(-FBgn)))
+colnames(egr)[1:8] <- c('Mean_Accessibility', 'PInd', 'density', 'GC.Promoter', 'GC.Body', 'exon_num',
+                        'GAGA_Sites', 'GAGA_Avg_Score')
+egr$DRE_Sites=0
+egr$DRE_Avg_Score=0
+egr$Disco_Sites=0
+egr$Disco_Avg_Score=0
+
+idx <- rep(1:nrow(egr), duptimes)
+egr_presim <- egr[idx,]
+egr_asim <- data.frame(HP1a = hp1a_sim, HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[1]], 1000),
+                       HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[1]], 1000))
+egr_hp1a_ints <- find_interactions(egr_asim, egr_presim)
+egr_hp1a <- data.frame(cbind(egr_asim, egr_presim, egr_hp1a_ints))
+egr_hp1a <- calc_hp1_ints(egr_hp1a)
+
+dcas_fbgns[2] %in% disco_summary$FBgn
+pyr <- data.frame(cbind(
+  tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[2]],
+  pinds$PInd[pinds$FBgn==dcas_fbgns[2]],
+  densities$density[densities$FBgn==dcas_fbgns[2]],
+  gc$GC.Promoter[gc$FBgn==dcas_fbgns[2]],
+  gc$GC.Body[gc$FBgn==dcas_fbgns[2]],
+  exons$exon_num[exons$FBgn==dcas_fbgns[2]],
+  #dre_sites=0
+  #dre_score=0
+  disco_summary$Disco_Sites[disco_summary$FBgn==dcas_fbgns[2]],
+  disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[2]],
+  gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[2]],
+  gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[2]],
+  cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[2],] %>%
+    select(-FBgn),
+  nucs[nucs$FBgn==dcas_fbgns[2],] %>%
+    select(-FBgn)))
+colnames(pyr)[1:10] <- c('Mean_Accessibility', 'PInd', 'density', 'GC.Promoter', 'GC.Body', 'exon_num',
+                        'Disco_Sites', 'Disco_Avg_Score', 'GAGA_Sites', 'GAGA_Avg_Score')
+pyr$DRE_Sites=0
+pyr$DRE_Avg_Score=0
+
+
+
+idx <- rep(1:nrow(pyr), duptimes)
+pyr_presim <- pyr[idx,]
+pyr_asim <- data.frame(HP1a = hp1a_sim, HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[2]], 1000),
+                       HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[2]], 1000))
+pyr_hp1a_ints <- find_interactions(pyr_asim, pyr_presim)
+pyr_hp1a <- data.frame(cbind(pyr_asim, pyr_presim, pyr_hp1a_ints))
+pyr_hp1a <- calc_hp1_ints(pyr_hp1a)
+
+
+mats <- data.frame(cbind(
+  tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[3]],
+  pinds$PInd[pinds$FBgn==dcas_fbgns[3]],
+  densities$density[densities$FBgn==dcas_fbgns[3]],
+  gc$GC.Promoter[gc$FBgn==dcas_fbgns[3]],
+  gc$GC.Body[gc$FBgn==dcas_fbgns[3]],
+  exons$exon_num[exons$FBgn==dcas_fbgns[3]],
+  #dre_sites=0
+  #dre_score=0
+  disco_summary$Disco_Sites[disco_summary$FBgn==dcas_fbgns[3]],
+  disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[3]],
+  gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[3]],
+  gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[3]],
+  cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[3],] %>%
+    select(-FBgn),
+  nucs[nucs$FBgn==dcas_fbgns[3],] %>%
+    select(-FBgn)))
+colnames(mats)[1:10] <- c('Mean_Accessibility', 'PInd', 'density', 'GC.Promoter', 'GC.Body', 'exon_num',
+                        'Disco_Sites', 'Disco_Avg_Score', 'GAGA_Sites', 'GAGA_Avg_Score')
+mats$DRE_Sites=0
+mats$DRE_Avg_Score=0
+
+
+idx <- rep(1:nrow(mats), duptimes)
+mats_presim <- mats[idx,]
+mats_asim <- data.frame(HP1a = hp1a_sim, HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[3]], 1000),
+                       HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[3]], 1000))
+mats_hp1a_ints <- find_interactions(mats_asim, mats_presim)
+mats_hp1a <- data.frame(cbind(mats_asim, mats_presim, mats_hp1a_ints))
+mats_hp1a <- calc_hp1_ints(mats_hp1a)
+```
+
+```{r}
+# rab3, shaw, cg76
+dcas_fbgns <- c('FBgn0030613', 'FBgn0003386', 'FBgn0035844')
+
+
+rab3 <- data.frame(cbind(
+  tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[1]],
+  pinds$PInd[pinds$FBgn==dcas_fbgns[1]],
+  #densities$density[densities$FBgn==dcas_fbgns[1]],
+  gc$GC.Promoter[gc$FBgn==dcas_fbgns[1]],
+  gc$GC.Body[gc$FBgn==dcas_fbgns[1]],
+  exons$exon_num[exons$FBgn==dcas_fbgns[1]],
+  #dre_sites=0
+  #dre_score=0
+  disco_summary$Disco_Sites[disco_summary$FBgn==dcas_fbgns[1]],
+  disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[1]],
+  gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[1]],
+  gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[1]],
+  cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[1],] %>%
+    select(-FBgn),
+  nucs[nucs$FBgn==dcas_fbgns[1],] %>%
+    select(-FBgn)))
+colnames(rab3)[1:9] <- c('Mean_Accessibility', 'PInd', 'GC.Promoter', 'GC.Body', 'exon_num',
+                          'Disco_Sites', 'Disco_Avg_Score', 'GAGA_Sites', 'GAGA_Avg_Score')
+rab3$DRE_Sites=0
+rab3$DRE_Avg_Score=0
+rab3$density=0.0002352941
+
+
+idx <- rep(1:nrow(rab3), duptimes)
+rab3_presim <- rab3[idx,]
+rab3_bsim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[1]], 1000), HP1B = hp1b_sim,
+                        HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[1]], 1000))
+rab3_hp1b_ints <- find_interactions(rab3_bsim, rab3_presim)
+rab3_hp1b <- data.frame(cbind(rab3_bsim, rab3_presim, rab3_hp1b_ints))
+rab3_hp1b <- calc_hp1_ints(rab3_hp1b)
+
+shaw <- data.frame(cbind(
+  tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[2]],
+  pinds$PInd[pinds$FBgn==dcas_fbgns[2]],
+  densities$density[densities$FBgn==dcas_fbgns[2]],
+  gc$GC.Promoter[gc$FBgn==dcas_fbgns[2]],
+  gc$GC.Body[gc$FBgn==dcas_fbgns[2]],
+  exons$exon_num[exons$FBgn==dcas_fbgns[2]],
+  #dre_sites=0
+  #dre_score=0
+  #disco_summary$Disco_Sites[disco_summary$FBgn==dcas_fbgns[2]],
+  #disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[2]],
+  gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[2]],
+  gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[2]],
+  cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[2],] %>%
+    select(-FBgn),
+  nucs[nucs$FBgn==dcas_fbgns[2],] %>%
+    select(-FBgn)))
+colnames(shaw)[1:8] <- c('Mean_Accessibility', 'PInd', 'density', 'GC.Promoter', 'GC.Body', 'exon_num',
+                         'GAGA_Sites', 'GAGA_Avg_Score')
+shaw$DRE_Sites=0
+shaw$DRE_Avg_Score=0
+shaw$Disco_Sites=0
+shaw$Disco_Avg_Score=0
+
+idx <- rep(1:nrow(shaw), duptimes)
+shaw_presim <- shaw[idx,]
+shaw_bsim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[2]], 1000), HP1B = hp1b_sim,
+                        HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[2]], 1000))
+shaw_hp1b_ints <- find_interactions(shaw_bsim, shaw_presim)
+shaw_hp1b <- data.frame(cbind(shaw_bsim, shaw_presim, shaw_hp1b_ints))
+shaw_hp1b <- calc_hp1_ints(shaw_hp1b)
+
+cg76 <- data.frame(cbind(
+  tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[3]],
+  pinds$PInd[pinds$FBgn==dcas_fbgns[3]],
+  #densities$density[densities$FBgn==dcas_fbgns[3]],
+  gc$GC.Promoter[gc$FBgn==dcas_fbgns[3]],
+  gc$GC.Body[gc$FBgn==dcas_fbgns[3]],
+  exons$exon_num[exons$FBgn==dcas_fbgns[3]],
+  #dre_sites=0
+  #dre_score=0
+  #disco_summary$Disco_Sites[disco_summary$FBgn==dcas_fbgns[3]],
+  #disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[3]],
+  gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[3]],
+  gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[3]],
+  cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[3],] %>%
+    select(-FBgn),
+  nucs[nucs$FBgn==dcas_fbgns[3],] %>%
+    select(-FBgn)))
+colnames(cg76)[1:7] <- c('Mean_Accessibility', 'PInd', 'GC.Promoter', 'GC.Body', 'exon_num',
+                         'GAGA_Sites', 'GAGA_Avg_Score')
+cg76$DRE_Sites=0
+cg76$DRE_Avg_Score=0
+cg76$Disco_Sites=0
+cg76$Disco_Avg_Score=0
+cg76$density=0.00005882353
+
+idx <- rep(1:nrow(cg76), duptimes)
+cg76_presim <- cg76[idx,]
+cg76_bsim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[3]], 1000), HP1B = hp1b_sim,
+                        HP1C = rep(hp1$HP1C[hp1$FBgn==dcas_fbgns[3]], 1000))
+cg76_hp1b_ints <- find_interactions(cg76_bsim, cg76_presim)
+cg76_hp1b <- data.frame(cbind(cg76_bsim, cg76_presim, cg76_hp1b_ints))
+cg76_hp1b <- calc_hp1_ints(cg76_hp1b)
+```
+
+```{r}
+# alphaTub, cg26
+dcas_fbgns <- c('FBgn0003884', 'FBgn0033794')
+
+alpha <- data.frame(cbind(
+  tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[1]],
+  pinds$PInd[pinds$FBgn==dcas_fbgns[1]],
+  densities$density[densities$FBgn==dcas_fbgns[1]],
+  gc$GC.Promoter[gc$FBgn==dcas_fbgns[1]],
+  gc$GC.Body[gc$FBgn==dcas_fbgns[1]],
+  exons$exon_num[exons$FBgn==dcas_fbgns[1]],
+  dre_summary$DRE_Sites[dre_summary$FBgn==dcas_fbgns[1]],
+  dre_summary$DRE_Avg_Score[dre_summary$FBgn==dcas_fbgns[1]],
+  #disco_summary$Disco_Sites[disco_summary$FBgn==dcas_fbgns[1]],
+  #disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[1]],
+  gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[1]],
+  gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[1]],
+  cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[1],] %>%
+    select(-FBgn),
+  nucs[nucs$FBgn==dcas_fbgns[1],] %>%
+    select(-FBgn)))
+colnames(alpha)[1:10] <- c('Mean_Accessibility', 'PInd', 'density', 'GC.Promoter', 'GC.Body', 'exon_num',
+                         'DRE_Sites', 'DRE_Avg_Score', 'GAGA_Sites', 'GAGA_Avg_Score')
+
+alpha$Disco_Sites=0
+alpha$Disco_Avg_Score=0
+
+
+idx <- rep(1:nrow(alpha), duptimes)
+alpha_presim <- alpha[idx,]
+alpha_csim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[1]], 1000), 
+                         HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[1]], 1000), HP1C = hp1c_sim)
+alpha_hp1c_ints <- find_interactions(alpha_csim, alpha_presim)
+alpha_hp1c <- data.frame(cbind(alpha_csim, alpha_presim, alpha_hp1c_ints))
+alpha_hp1c <- calc_hp1_ints(alpha_hp1c)
+
+cg26 <- data.frame(cbind(
+  tss$Mean_Accesibility[tss$FBgn==dcas_fbgns[2]],
+  pinds$PInd[pinds$FBgn==dcas_fbgns[2]],
+  densities$density[densities$FBgn==dcas_fbgns[2]],
+  gc$GC.Promoter[gc$FBgn==dcas_fbgns[2]],
+  gc$GC.Body[gc$FBgn==dcas_fbgns[2]],
+  exons$exon_num[exons$FBgn==dcas_fbgns[2]],
+  #dre_summary$DRE_Sites[dre_summary$FBgn==dcas_fbgns[2]],
+  #dre_summary$DRE_Avg_Score[dre_summary$FBgn==dcas_fbgns[2]],
+  #disco_summary$Disco_Sites[disco_summary$FBgn==dcas_fbgns[2]],
+  #disco_summary$Disco_Avg_Score[disco_summary$FBgn==dcas_fbgns[2]],
+  gaga_summary$GAGA_Sites[gaga_summary$FBgn==dcas_fbgns[2]],
+  gaga_summary$GAGA_Avg_Score[gaga_summary$FBgn==dcas_fbgns[2]],
+  cstate_1hot[cstate_1hot$FBgn==dcas_fbgns[2],] %>%
+    select(-FBgn),
+  nucs[nucs$FBgn==dcas_fbgns[2],] %>%
+    select(-FBgn)))
+colnames(cg26)[1:8] <- c('Mean_Accessibility', 'PInd', 'density', 'GC.Promoter', 'GC.Body', 'exon_num',
+                           'GAGA_Sites', 'GAGA_Avg_Score')
+
+cg26$DRE_Sites=0
+cg26$DRE_Avg_Score=0
+cg26$Disco_Sites=0
+cg26$Disco_Avg_Score=0
+
+
+idx <- rep(1:nrow(cg26), duptimes)
+cg26_presim <- cg26[idx,]
+cg26_csim <- data.frame(HP1a = rep(hp1$HP1a[hp1$FBgn==dcas_fbgns[2]], 1000), 
+                         HP1B = rep(hp1$HP1B[hp1$FBgn==dcas_fbgns[2]], 1000), HP1C = hp1c_sim)
+cg26_hp1c_ints <- find_interactions(cg26_csim, cg26_presim)
+cg26_hp1c <- data.frame(cbind(cg26_csim, cg26_presim, cg26_hp1c_ints))
+cg26_hp1c <- calc_hp1_ints(cg26_hp1c)
+```
+
+### Output simulated datasets
+
+```{r}
+
+write.table(egr_hp1a, file = 'egr_HP1a_hp1_plus_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+egr_hp1a %>%
+  select(HP1a, HP1B, HP1C, A_B, A_C, B_C, A_B_C) %>%
+  write.table(file = 'egr_HP1a_hp1_only_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+
+write.table(pyr_hp1a, file = 'pyr_HP1a_hp1_plus_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+pyr_hp1a %>%
+  select(HP1a, HP1B, HP1C, A_B, A_C, B_C, A_B_C) %>%
+  write.table(file = 'pyr_HP1a_hp1_only_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+
+write.table(mats_hp1a, file = 'mats_HP1a_hp1_plus_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+mats_hp1a %>%
+  select(HP1a, HP1B, HP1C, A_B, A_C, B_C, A_B_C) %>%
+  write.table(file = 'mats_HP1a_hp1_only_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+
+write.table(rab3_hp1b, file = 'rab3_hp1b_hp1_plus_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+rab3_hp1b %>%
+  select(HP1a, HP1B, HP1C, A_B, A_C, B_C, A_B_C) %>%
+  write.table(file = 'rab3_hp1b_hp1_only_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+
+write.table(shaw_hp1b, file = 'shaw_hp1b_hp1_plus_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+shaw_hp1b %>%
+  select(HP1a, HP1B, HP1C, A_B, A_C, B_C, A_B_C) %>%
+  write.table(file = 'shaw_hp1b_hp1_only_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+
+write.table(cg76_hp1b, file = 'cg76_hp1b_hp1_plus_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+cg76_hp1b %>%
+  select(HP1a, HP1B, HP1C, A_B, A_C, B_C, A_B_C) %>%
+  write.table(file = 'cg76_hp1b_hp1_only_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+
+write.table(alpha_hp1c, file = 'alpha_hp1c_hp1_plus_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+alpha_hp1c %>%
+  select(HP1a, HP1B, HP1C, A_B, A_C, B_C, A_B_C) %>%
+  write.table(file = 'alpha_hp1c_hp1_only_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+
+write.table(cg26_hp1c, file = 'cg26_hp1c_hp1_plus_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+cg26_hp1c %>%
+  select(HP1a, HP1B, HP1C, A_B, A_C, B_C, A_B_C) %>%
+  write.table(file = 'cg26_hp1c_hp1_only_inputs.csv', col.names = T, row.names = F, sep = ',', quote = F)
+
+```
